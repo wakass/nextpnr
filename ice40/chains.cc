@@ -241,11 +241,6 @@ class ChainConstrainer
                     co_cin_net->users.push_back(*fnd_user);
                     usr.erase(fnd_user);
                     cin_cell->ports.at(port).net = co_cin_net.get();
-
-                    if (ctx->debug){
-                        log_info("Next user cell:  %s\n", fnd_user->cell->name.c_str(ctx));
-                        log_info("Port ref: %s\n",fnd_user->port.c_str(ctx));
-                    }
                     ++replaced_ports;
                 }
             }
