@@ -51,9 +51,13 @@ struct LutCell
 
 struct LutBel
 {
+    IdString name;
+
     // LUT BEL pins to LUT array index.
     std::vector<IdString> pins;
     std::unordered_map<IdString, size_t> pin_to_index;
+
+    IdString output_pin;
 
     // What part of the LUT equation does this LUT output use?
     // This assumes contiguous LUT bits.
@@ -88,6 +92,8 @@ struct LutMapper
     std::vector<CellInfo *> cells;
 
     bool remap_luts(const Context *ctx);
+    uint32_t check_wires(const std::vector<std::vector<int32_t>> &bel_to_cell_pin_remaps,
+                         const std::vector<const LutBel *> &lut_bels, uint32_t used_pins) const;
 };
 
 // Rotate and merge a LUT equation into an array of levels.
