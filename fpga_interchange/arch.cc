@@ -247,9 +247,12 @@ Arch::Arch(ArchArgs args) : args(args)
             LutElement &element = elements.back();
             element.width = lut_element.width;
             for (auto &lut_bel : lut_element.lut_bels) {
-                auto result = element.lut_bels.emplace(IdString(lut_bel.name), LutBel());
+                IdString name(lut_bel.name);
+                auto result = element.lut_bels.emplace(name, LutBel());
                 NPNR_ASSERT(result.second);
                 LutBel &lut = result.first->second;
+
+                lut.name = name;
 
                 lut.low_bit = lut_bel.low_bit;
                 lut.high_bit = lut_bel.high_bit;
@@ -260,6 +263,8 @@ Arch::Arch(ArchArgs args) : args(args)
                     lut.pins.push_back(pin);
                     lut.pin_to_index[pin] = i;
                 }
+
+                lut.output_pin = IdString(lut_bel.out_pin);
             }
 
             element.compute_pin_order();
@@ -1655,7 +1660,8 @@ bool Arch::checkPipAvailForNet(PipId pip, NetInfo *net) const
 
     // If this pip is a route-though, make sure all of the route-though
     // wires are unbound.
-    const PipInfoPOD &pip_data = pip_info(chip_info, pip);
+    const TileTypeInfoPOD &tile_type = loc_info(chip_info, pip);
+    const PipInfoPOD &pip_data = tile_type.pip_data[pip.index];
     WireId wire;
     wire.tile = pip.tile;
     for (int32_t wire_index : pip_data.pseudo_cell_wires) {
@@ -1676,23 +1682,37 @@ bool Arch::checkPipAvailForNet(PipId pip, NetInfo *net) const
     }
 
     if (pip_data.site != -1 && net != nullptr) {
+        // FIXME: This check isn't perfect.  If a driver and sink are in the
+        // same site, it is possible for the router to route-thru the site
+        // ports without hitting a sink, which is not legal in the FPGA
+        // interchange.
         NPNR_ASSERT(net->driver.cell != nullptr);
         NPNR_ASSERT(net->driver.cell->bel != BelId());
 
+        auto &src_wire_data = tile_type.wire_data[pip_data.src_index];
+        auto &dst_wire_data = tile_type.wire_data[pip_data.dst_index];
+
         bool valid_pip = false;
         if (pip.tile == net->driver.cell->bel.tile) {
-            auto &bel_data = bel_info(chip_info, net->driver.cell->bel);
+            const BelInfoPOD &bel_data = tile_type.bel_data[net->driver.cell->bel.index];
             if (bel_data.site == pip_data.site) {
-                valid_pip = true;
+                // Only allow site pips or output site ports.
+                if (dst_wire_data.site == -1) {
+                    // Allow output site port from this site.
+                    NPNR_ASSERT(src_wire_data.site == pip_data.site);
+                    valid_pip = true;
+                }
+
+                if (dst_wire_data.site == bel_data.site && src_wire_data.site == bel_data.site) {
+                    // This is site pip for the same site as the driver, allow
+                    // this site pip.
+                    valid_pip = true;
+                }
             }
         }
 
         if (!valid_pip) {
             // See if one users can enter this site.
-            auto &tile_type = loc_info(chip_info, pip);
-            auto &src_wire_data = tile_type.wire_data[pip_data.src_index];
-            auto &dst_wire_data = tile_type.wire_data[pip_data.dst_index];
-
             if (dst_wire_data.site == -1) {
                 // This is an output site port, but not for the driver net.
                 // Disallow.

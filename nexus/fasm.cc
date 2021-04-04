@@ -385,9 +385,13 @@ struct NexusFasmWriter
         } else if (tmux == PINMUX_1 || t == nullptr) {
             is_input = true;
         }
+        auto &bank = bank_cfg[ctx->get_bel_pad(bel)->bank];
+        if (is_lifcl_17 && (is_output || !is_input))
+            bank.diff_used = true; // what exactly should this bit be called?
         const char *iodir = is_input ? "INPUT" : (is_output ? "OUTPUT" : "BIDIR");
         write_bit(stringf("BASE_TYPE.%s_%s", iodir, str_or_default(cell->attrs, id_IO_TYPE, "LVCMOS18H").c_str()));
         write_ioattr(cell, "PULLMODE", "NONE");
+        write_ioattr(cell, "SLEWRATE", "MED");
         pop();
         write_cell_muxes(cell);
         pop();
@@ -638,6 +642,8 @@ struct NexusFasmWriter
     {
         BelId bel = cell->bel;
         push_bel(bel);
+        if (is_lifcl_17)
+            write_bit("MODE.LRAM_CORE");
         write_enum(cell, "ASYNC_RST_RELEASE", "SYNC");
         write_enum(cell, "EBR_SP_EN", "DISABLE");
         write_enum(cell, "ECC_BYTE_SEL", "BYTE_EN");
