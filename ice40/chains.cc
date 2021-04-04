@@ -75,29 +75,44 @@ class ChainConstrainer
                 bool at_end = (curr_cell == carryc.cells.end() - 1);
                 if (carry_net != nullptr && (carry_net->users.size() > 1 || at_end)) {
                     if (carry_net->users.size() > 2 ||
+                        
+                        //return cells driven by specific net. (bool is exclusive driving)
+                        //make sure here that cin and i3 are muxed or not exclusively driving
                         (net_only_drives(ctx, carry_net, is_lc, ctx->id("I3"), false) !=
-                         net_only_drives(ctx, carry_net, is_lc, ctx->id("CIN"), false)) ||
+                         net_only_drives(ctx, carry_net, is_lc, ctx->id("CIN"), false)) 
+                        
+                        || //at end of chain with i3 not driven by a net
                         (at_end && !net_only_drives(ctx, carry_net, is_lc, ctx->id("I3"), true))) {
-                        if (ctx->debug)
-                            log_info("      inserting feed-%s\n", at_end ? "out" : "out-in");
-                        CellInfo *passout;
-                        if (!at_end) {
-                            // See if we need to split chain anyway
-                            tile.push_back(*(curr_cell + 1));
-                            bool split_chain_next = (!ctx->logic_cells_compatible(tile.data(), tile.size())) ||
-                                                    (int(chains.back().cells.size()) > max_length);
-                            tile.pop_back();
-                            if (split_chain_next)
-                                start_of_chain = true;
-                            passout = make_carry_pass_out(cell->ports.at(ctx->id("COUT")),
-                                                          split_chain_next ? nullptr : *(curr_cell + 1));
-                        } else {
-                            passout = make_carry_pass_out(cell->ports.at(ctx->id("COUT")), nullptr);
-                        }
+                            if (ctx->debug)
+                                log_info("      inserting feed-%s\n", at_end ? "out" : "out-in");
+                            CellInfo *passout;
+                             
+                            if (!at_end) {
+                                // See if we need to split chain anyway
+                                tile.push_back(*(curr_cell + 1));
+                                bool split_chain_next = (!ctx->logic_cells_compatible(tile.data(), tile.size())) ||
+                                                        (int(chains.back().cells.size()) > max_length);
+                                tile.pop_back();
+                                if (split_chain_next)
+                                    start_of_chain = true;
 
-                        chains.back().cells.push_back(passout);
-                        tile.push_back(passout);
-                        ++feedio_lcs;
+                                if (cell->ports.at(ctx->id("I3")).net == nullptr) {
+                                    if (ctx->debug)
+                                        log_info("      repurposing for LUT-out\n");                                
+                                    make_cell_pass_out(cell->ports.at(ctx->id("COUT")), cell, *(curr_cell + 1));
+                                    passout = nullptr;
+                                }
+                                else 
+                                    passout = make_carry_pass_out(cell->ports.at(ctx->id("COUT")),
+                                                              split_chain_next ? nullptr : *(curr_cell + 1));
+                            } else {
+                                passout = make_carry_pass_out(cell->ports.at(ctx->id("COUT")), nullptr);
+                            }
+                            if (passout){
+                                chains.back().cells.push_back(passout);
+                                tile.push_back(passout);
+                                ++feedio_lcs;
+                            }
                     }
                 }
                 ++curr_cell;
@@ -105,26 +120,85 @@ class ChainConstrainer
         }
         return chains;
     }
+    CellInfo *make_cell_pass_out(PortInfo&cout_port, CellInfo *cell = nullptr, CellInfo *next_carry = nullptr){
+        NPNR_ASSERT(cout_port.net != nullptr);
+        
 
+        if (cell && cell->ports.at(ctx->id("I3")).net == nullptr) {
+            //if i3 is not connected on the cell. Just use that with the mux to LUT to route-out.    
+            cell->params[ctx->id("LUT_INIT")] = Property(65280, 16); // 0xff00: O = I3
+            cell->params[ctx->id("CARRY_IN_SET")] = Property::State::S1;
+            
+
+            if (ctx->debug){
+                log_info("Make cell pass out:  %s. (%s)\n", cell->name.c_str(ctx),cout_port.net->name.c_str(ctx));
+            }
+
+            std::unique_ptr<NetInfo> out_net(new NetInfo());
+            out_net->name = ctx->id(cell->name.str(ctx) + "$LUT_PASS");
+            // out_net->driver = cout_port.net->driver;
+
+            cell->ports.at(id_O).net = out_net.get();
+
+            PortRef o_r;
+            o_r.port = id_O;
+            o_r.cell = cell;
+            cell->ports.at(id_O).net->driver = o_r;
+
+            // Find the user not corresponding to any users of COUT
+            int replaced_ports = 0;
+
+            for (auto port : {id_COUT}) {
+                auto &users = cell->ports.at(id_COUT).net->users;
+                if (ctx->debug)
+                    for (auto user : users)
+                        log_info("User: %s.%s\n", user.cell->name.c_str(ctx), user.port.c_str(ctx));
+                auto fnd_user = std::find_if(users.begin(), users.end(),
+                                             [&](const PortRef &pr) { return pr.cell != next_carry; });
+                while (fnd_user != users.end()) {
+                    fnd_user->cell->ports.at(fnd_user->port).net = out_net.get();
+                    out_net->users.push_back(*fnd_user);
+                    users.erase(fnd_user);
+                    
+                    if (ctx->debug){
+                        log_info("Replaced net for:  %s.%s\n", fnd_user->cell->name.c_str(ctx),fnd_user->port.c_str(ctx));
+                    }
+                    ++replaced_ports;
+                }
+            }
+            IdString out_net_name = out_net->name;
+            NPNR_ASSERT(ctx->nets.find(out_net_name) == ctx->nets.end());
+            ctx->nets[out_net_name] = std::move(out_net);
+
+        }
+        return cell;
+    }
     // Insert a logic cell to legalise a COUT->fabric connection
     CellInfo *make_carry_pass_out(PortInfo &cout_port, CellInfo *cin_cell = nullptr)
     {
         NPNR_ASSERT(cout_port.net != nullptr);
+    
         std::unique_ptr<CellInfo> lc = create_ice_cell(ctx, ctx->id("ICESTORM_LC"));
         lc->params[ctx->id("LUT_INIT")] = Property(65280, 16); // 0xff00: O = I3
         lc->params[ctx->id("CARRY_ENABLE")] = Property::State::S1;
         lc->ports.at(id_O).net = cout_port.net;
+    
+    
         std::unique_ptr<NetInfo> co_i3_net(new NetInfo());
         co_i3_net->name = ctx->id(lc->name.str(ctx) + "$I3");
         co_i3_net->driver = cout_port.net->driver;
+        
         PortRef i3_r;
         i3_r.port = id_I3;
         i3_r.cell = lc.get();
         co_i3_net->users.push_back(i3_r);
+
         PortRef o_r;
         o_r.port = id_O;
         o_r.cell = lc.get();
+
         cout_port.net->driver = o_r;
+
         lc->ports.at(id_I3).net = co_i3_net.get();
         cout_port.net = co_i3_net.get();
 
@@ -167,6 +241,11 @@ class ChainConstrainer
                     co_cin_net->users.push_back(*fnd_user);
                     usr.erase(fnd_user);
                     cin_cell->ports.at(port).net = co_cin_net.get();
+
+                    if (ctx->debug){
+                        log_info("Next user cell:  %s\n", fnd_user->cell->name.c_str(ctx));
+                        log_info("Port ref: %s\n",fnd_user->port.c_str(ctx));
+                    }
                     ++replaced_ports;
                 }
             }
@@ -180,6 +259,7 @@ class ChainConstrainer
         ctx->assignCellInfo(lc.get());
         ctx->cells[lc->name] = std::move(lc);
         return ctx->cells[name].get();
+
     }
 
     // Insert a logic cell to legalise a CIN->fabric connection
